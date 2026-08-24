@@ -4,14 +4,14 @@ on:
   pull_request:
     paths:
       - .github/workflows/build-patched-sandbox.yml
-      - patches/codeapi-sandbox-unrestricted-egress-v1.patch
+      - patches/codeapi-sandbox-unrestricted-egress-v2.patch
       - versions.env
   push:
     branches:
       - main
     paths:
       - .github/workflows/build-patched-sandbox.yml
-      - patches/codeapi-sandbox-unrestricted-egress-v1.patch
+      - patches/codeapi-sandbox-unrestricted-egress-v2.patch
       - versions.env
   workflow_dispatch: {}
 
@@ -19,12 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: codeapi-sandbox-unrestricted-egress-v1-${{ github.ref }}
+  group: codeapi-sandbox-unrestricted-egress-v2-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-  PATCH_VARIANT: unrestricted-egress-v1
+  PATCH_VARIANT: unrestricted-egress-v2
 
 jobs:
   config:
@@ -75,8 +75,8 @@ jobs:
       - name: Apply sandbox patch
         run: |
           set -euo pipefail
-          git -C upstream apply --unidiff-zero --check ../patches/codeapi-sandbox-unrestricted-egress-v1.patch
-          git -C upstream apply --unidiff-zero ../patches/codeapi-sandbox-unrestricted-egress-v1.patch
+          git -C upstream apply --unidiff-zero --check ../patches/codeapi-sandbox-unrestricted-egress-v2.patch
+          git -C upstream apply --unidiff-zero ../patches/codeapi-sandbox-unrestricted-egress-v2.patch
 
       - name: Run focused regression tests
         run: |

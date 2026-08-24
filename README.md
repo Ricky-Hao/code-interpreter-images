@@ -35,6 +35,20 @@ ghcr.io/ricky-hao/codeapi-api:upstream-<full-commit-sha>-utf8-inputs-v1
 
 The patch decodes multipart filename parameters as UTF-8 and collapses aliases of the same fully authorized storage object before sandbox delivery. It keeps distinct objects with conflicting destinations separate so the sandbox still rejects ambiguous input paths. The workflow runs the focused Bun regression tests before building the API image.
 
+### Patched sandbox variant
+
+`build-patched-sandbox.yml` applies
+`patches/codeapi-sandbox-unrestricted-egress-v2.patch` and publishes only:
+
+```text
+ghcr.io/ricky-hao/codeapi-sandbox-runner:upstream-<full-commit-sha>-unrestricted-egress-v2
+```
+
+When `SANDBOX_DISABLE_NETWORKING=false`, the patch shares the runner network
+namespace with NsJail and mounts the runner's resolver configuration read-only
+at `/etc/resolv.conf`. The default `SANDBOX_DISABLE_NETWORKING=true` behavior
+remains isolated and does not receive the resolver mount.
+
 ## Publishing
 
 A push to `main`, or a manual run of **Build Code Interpreter images**, publishes to:
