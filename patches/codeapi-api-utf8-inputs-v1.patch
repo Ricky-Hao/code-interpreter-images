@@ -1,0 +1,116 @@
+diff --git a/service/src/service/file-authorization.test.ts b/service/src/service/file-authorization.test.ts
+index 4d98c59..35b3730 100644
+--- a/service/src/service/file-authorization.test.ts
++++ b/service/src/service/file-authorization.test.ts
+@@ -318,0 +319,26 @@ describe('authorizeRequestedFiles', () => {
++  test('deduplicates aliases for the same authorized storage object', async () => {
++    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
++    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
++    const store = ownedStore(sessionKey);
++
++    await expect(authorizeRequestedFiles({
++      req,
++      files: [validFile(), validFile({ name: 'inputs/alias.csv' })],
++      store,
++    })).resolves.toEqual([validFile()]);
++  });
++
++  test('preserves distinct storage objects that share a destination', async () => {
++    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
++    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
++    const secondFile = validFile({ id: 'file_abcdefghijklmnop' });
++    const store = ownedStore(sessionKey);
++    store.set(`upload:${sessionKey}${secondFile.storage_session_id}${secondFile.id}`, 'true');
++
++    await expect(authorizeRequestedFiles({
++      req,
++      files: [validFile(), secondFile],
++      store,
++    })).resolves.toEqual([validFile(), secondFile]);
++  });
++
+diff --git a/service/src/service/file-authorization.ts b/service/src/service/file-authorization.ts
+index 4afa2c8..d8fad76 100644
+--- a/service/src/service/file-authorization.ts
++++ b/service/src/service/file-authorization.ts
+@@ -272 +272,9 @@ export async function authorizeRequestedFiles(args: {
+-  return requestedFiles;
++  /* Every supplied alias is authorized above before equivalent storage
++   * objects are collapsed, so duplicates cannot bypass ownership checks. */
++  const authorizedObjects = new Set<string>();
++  return requestedFiles.filter((file) => {
++    const storageIdentity = `${file.storage_session_id}\0${file.id}`;
++    if (authorizedObjects.has(storageIdentity)) return false;
++    authorizedObjects.add(storageIdentity);
++    return true;
++  });
+diff --git a/service/src/service/router.ts b/service/src/service/router.ts
+index f355c2d..16efb93 100644
+--- a/service/src/service/router.ts
++++ b/service/src/service/router.ts
+@@ -26,0 +27 @@ import { createUploadSessionRegistrar } from './upload-session';
++import { createUploadParser } from './upload-parser';
+@@ -365 +366 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
+-    const bb = busboy({
++    const bb = createUploadParser({
+@@ -575 +576 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest,
+-    const bb = busboy({
++    const bb = createUploadParser({
+diff --git a/service/src/service/upload-parser.test.ts b/service/src/service/upload-parser.test.ts
+new file mode 100644
+index 0000000..e1cd232
+--- /dev/null
++++ b/service/src/service/upload-parser.test.ts
+@@ -0,0 +1,34 @@
++import { expect, test } from 'bun:test';
++import { createUploadParser } from './upload-parser';
++
++test('decodes multipart filenames as UTF-8', async () => {
++    const boundary = 'codeapi-utf8-boundary';
++    const filename = '中文测试文件.txt';
++    const body = Buffer.from(
++        [
++            `--${boundary}`,
++            `Content-Disposition: form-data; name="files"; filename="${filename}"`,
++            'Content-Type: text/plain',
++            '',
++            'UTF8_CONTENT_OK',
++            `--${boundary}--`,
++            '',
++        ].join('\r\n')
++    );
++
++    const parsedFilename = await new Promise<string>((resolve, reject) => {
++        const parser = createUploadParser({
++            headers: {
++                'content-type': `multipart/form-data; boundary=${boundary}`,
++            },
++        });
++        parser.on('file', (_fieldname, stream, info) => {
++            stream.resume();
++            resolve(info.filename);
++        });
++        parser.on('error', reject);
++        parser.end(body);
++    });
++
++    expect(parsedFilename).toBe(filename);
++});
+diff --git a/service/src/service/upload-parser.ts b/service/src/service/upload-parser.ts
+new file mode 100644
+index 0000000..62b07f9
+--- /dev/null
++++ b/service/src/service/upload-parser.ts
+@@ -0,0 +1,12 @@
++import busboy from 'busboy';
++
++type BusboyConfig = Parameters<typeof busboy>[0];
++
++export function createUploadParser(
++    config: BusboyConfig
++): ReturnType<typeof busboy> {
++    return busboy({
++        ...config,
++        defParamCharset: 'utf8',
++    });
++}

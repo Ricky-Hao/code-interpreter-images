@@ -1,6 +1,6 @@
 # Code Interpreter Images
 
-Builds the six `linux/amd64` images required by LibreChat Code Interpreter and publishes them to GHCR. The source is checked out from an immutable upstream commit; this repository does not vendor or modify the upstream application.
+Builds the six `linux/amd64` images required by LibreChat Code Interpreter and publishes them to GHCR. The base images use an immutable, unmodified upstream commit. A separately tagged API variant applies the reviewed local patch under `patches/` without changing the base image tags.
 
 ## Pinned source
 
@@ -14,16 +14,26 @@ Update the full commit SHA in that file to build a newer upstream revision. Pull
 
 ## Images
 
-| GHCR package | Dockerfile | Target |
-| --- | --- | --- |
-| `codeapi-api` | `service/Dockerfile.api` | `production` |
-| `codeapi-worker` | `service/Dockerfile.worker` | `production` |
-| `codeapi-file-server` | `service/Dockerfile` | `production` |
-| `codeapi-egress-gateway` | `service/Dockerfile.egress-gateway` | `production` |
-| `codeapi-tool-call-server` | `service/Dockerfile.tool-call-server` | `production` |
-| `codeapi-sandbox-runner` | `api/Dockerfile` | `sandbox-runner-baked` |
+| GHCR package               | Dockerfile                            | Target                 |
+| -------------------------- | ------------------------------------- | ---------------------- |
+| `codeapi-api`              | `service/Dockerfile.api`              | `production`           |
+| `codeapi-worker`           | `service/Dockerfile.worker`           | `production`           |
+| `codeapi-file-server`      | `service/Dockerfile`                  | `production`           |
+| `codeapi-egress-gateway`   | `service/Dockerfile.egress-gateway`   | `production`           |
+| `codeapi-tool-call-server` | `service/Dockerfile.tool-call-server` | `production`           |
+| `codeapi-sandbox-runner`   | `api/Dockerfile`                      | `sandbox-runner-baked` |
 
 The matrix is maintained in [`images.json`](images.json). The baked sandbox runner has a separate three-hour job because it compiles the language runtimes and creates the MicroVM root disk during the build.
+
+### Patched API variant
+
+`build-patched-api.yml` applies `patches/codeapi-api-utf8-inputs-v1.patch` and publishes only:
+
+```text
+ghcr.io/ricky-hao/codeapi-api:upstream-<full-commit-sha>-utf8-inputs-v1
+```
+
+The patch decodes multipart filename parameters as UTF-8 and collapses aliases of the same fully authorized storage object before sandbox delivery. It keeps distinct objects with conflicting destinations separate so the sandbox still rejects ambiguous input paths. The workflow runs the focused Bun regression tests before building the API image.
 
 ## Publishing
 
