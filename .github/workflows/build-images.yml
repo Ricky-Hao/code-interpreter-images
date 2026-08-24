@@ -1,0 +1,264 @@
+name: Build Code Interpreter images
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/build-images.yml
+      - images.json
+      - scripts/verify-config.sh
+      - versions.env
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-images.yml
+      - images.json
+      - scripts/verify-config.sh
+      - versions.env
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-interpreter-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  config:
+    name: Read and validate configuration
+    runs-on: ubuntu-24.04
+    outputs:
+      sandbox_dockerfile: ${{ steps.config.outputs.sandbox_dockerfile }}
+      sandbox_image: ${{ steps.config.outputs.sandbox_image }}
+      sandbox_target: ${{ steps.config.outputs.sandbox_target }}
+      services: ${{ steps.config.outputs.services }}
+      upstream_repository: ${{ steps.config.outputs.upstream_repository }}
+      upstream_sha: ${{ steps.config.outputs.upstream_sha }}
+    steps:
+      - name: Check out image configuration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate configuration
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/verify-config.sh
+
+          # shellcheck source=/dev/null
+          source versions.env
+          {
+            echo "upstream_repository=${UPSTREAM_REPOSITORY}"
+            echo "upstream_sha=${UPSTREAM_SHA}"
+            echo "services=$(jq -c '{include: .services}' images.json)"
+            echo "sandbox_image=$(jq -r '.sandbox.image' images.json)"
+            echo "sandbox_dockerfile=$(jq -r '.sandbox.dockerfile' images.json)"
+            echo "sandbox_target=$(jq -r '.sandbox.target' images.json)"
+          } >>"${GITHUB_OUTPUT}"
+
+  dockerfile-checks:
+    name: Validate upstream Docker targets
+    needs: config
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out image configuration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Check out pinned upstream source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ needs.config.outputs.upstream_repository }}
+          ref: ${{ needs.config.outputs.upstream_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Check every configured target
+        run: bash scripts/verify-config.sh upstream
+
+  build-services:
+    name: Build ${{ matrix.image }}
+    if: github.event_name != 'pull_request'
+    needs:
+      - config
+      - dockerfile-checks
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.config.outputs.services) }}
+    steps:
+      - name: Check out pinned upstream source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ needs.config.outputs.upstream_repository }}
+          ref: ${{ needs.config.outputs.upstream_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image name and tags
+        id: image
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IMAGE: ${{ matrix.image }}
+          UPSTREAM_SHA: ${{ needs.config.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_name="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}"
+          short_sha="${UPSTREAM_SHA:0:12}"
+
+          {
+            echo "name=${image_name}"
+            echo "tags<<TAGS"
+            echo "${image_name}:upstream-${UPSTREAM_SHA}"
+            echo "${image_name}:upstream-${short_sha}"
+            if [[ "${GITHUB_REF_NAME}" == "${DEFAULT_BRANCH}" ]]; then
+              echo "${image_name}:latest"
+            fi
+            echo "TAGS"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: upstream
+          file: upstream/${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ needs.config.outputs.upstream_repository }}
+            org.opencontainers.image.revision=${{ needs.config.outputs.upstream_sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min
+          provenance: mode=max
+          sbom: true
+
+      - name: Record deployable digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          echo "### ${IMAGE_NAME}" >>"${GITHUB_STEP_SUMMARY}"
+          echo '```text' >>"${GITHUB_STEP_SUMMARY}"
+          echo "${IMAGE_NAME}@${DIGEST}" >>"${GITHUB_STEP_SUMMARY}"
+          echo '```' >>"${GITHUB_STEP_SUMMARY}"
+
+  build-sandbox:
+    name: Build baked sandbox runner
+    if: github.event_name != 'pull_request'
+    needs:
+      - config
+      - dockerfile-checks
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out pinned upstream source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ needs.config.outputs.upstream_repository }}
+          ref: ${{ needs.config.outputs.upstream_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet /opt/ghc
+          docker system prune --all --force
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image name and tags
+        id: image
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IMAGE: ${{ needs.config.outputs.sandbox_image }}
+          UPSTREAM_SHA: ${{ needs.config.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_name="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}"
+          short_sha="${UPSTREAM_SHA:0:12}"
+
+          {
+            echo "name=${image_name}"
+            echo "tags<<TAGS"
+            echo "${image_name}:upstream-${UPSTREAM_SHA}"
+            echo "${image_name}:upstream-${short_sha}"
+            if [[ "${GITHUB_REF_NAME}" == "${DEFAULT_BRANCH}" ]]; then
+              echo "${image_name}:latest"
+            fi
+            echo "TAGS"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build and push baked runner
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: upstream
+          file: upstream/${{ needs.config.outputs.sandbox_dockerfile }}
+          target: ${{ needs.config.outputs.sandbox_target }}
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ needs.config.outputs.upstream_repository }}
+            org.opencontainers.image.revision=${{ needs.config.outputs.upstream_sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min
+          provenance: mode=max
+          sbom: true
+
+      - name: Record deployable digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          echo "### ${IMAGE_NAME}" >>"${GITHUB_STEP_SUMMARY}"
+          echo '```text' >>"${GITHUB_STEP_SUMMARY}"
+          echo "${IMAGE_NAME}@${DIGEST}" >>"${GITHUB_STEP_SUMMARY}"
+          echo '```' >>"${GITHUB_STEP_SUMMARY}"

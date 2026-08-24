@@ -1,0 +1,34 @@
+{
+  "services": [
+    {
+      "image": "codeapi-api",
+      "dockerfile": "service/Dockerfile.api",
+      "target": "production"
+    },
+    {
+      "image": "codeapi-worker",
+      "dockerfile": "service/Dockerfile.worker",
+      "target": "production"
+    },
+    {
+      "image": "codeapi-file-server",
+      "dockerfile": "service/Dockerfile",
+      "target": "production"
+    },
+    {
+      "image": "codeapi-egress-gateway",
+      "dockerfile": "service/Dockerfile.egress-gateway",
+      "target": "production"
+    },
+    {
+      "image": "codeapi-tool-call-server",
+      "dockerfile": "service/Dockerfile.tool-call-server",
+      "target": "production"
+    }
+  ],
+  "sandbox": {
+    "image": "codeapi-sandbox-runner",
+    "dockerfile": "api/Dockerfile",
+    "target": "sandbox-runner-baked"
+  }
+}
